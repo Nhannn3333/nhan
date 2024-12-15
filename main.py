@@ -1,24 +1,11 @@
-# main.py
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from database import get_db
-from crud import get_user_by_username, create_user
-from pydantic import BaseModel
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
+from models import User
+from database import get_db
+from pydantic import BaseModel
 
 app = FastAPI()
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Dùng passlib để hash mật khẩu
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class UserCreate(BaseModel):
@@ -41,6 +28,30 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 def login_user(user: UserLogin, db: Session = Depends(get_db)):
     db_user = get_user_by_username(db, user.username)
+
+    # Kiểm tra trạng thái khóa tài khoản
+    if db_user and db_user.is_locked:
+        return {"message": "Account is locked due to multiple failed login attempts."}
+
     if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
+        if db_user:
+            db_user.failed_attempts += 1
+            if db_user.failed_attempts >= 3:
+                db_user.is_locked = True
+            db.commit()
         return {"message": "Invalid username or password"}
+
+    # Reset failed_attempts nếu đăng nhập thành công
+    db_user.failed_attempts = 0
+    db.commit()
     return {"message": f"Welcome {db_user.displayname}!"}
+
+def get_user_by_username(db: Session, username: str):
+    return db.query(User).filter(User.username == username).first()
+
+def create_user(db: Session, displayname: str, username: str, hashed_password: str):
+    new_user = User(displayname=displayname, username=username, hashed_password=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user

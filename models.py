@@ -1,5 +1,5 @@
 # models.py
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Column, Integer, String, Boolean
 from database import Base
 
 class User(Base):
@@ -8,3 +8,5 @@ class User(Base):
     displayname = Column(String, index=True)  # Thêm trường displayname
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    failed_attempts = Column(Integer, default=0)  # Số lần đăng nhập thất bại
+    is_locked = Column(Boolean, default=False)  # Trạng thái khóa tài khoản
