@@ -1,122 +1,73 @@
-from fastapi import FastAPI, Request, Form, Depends
-from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
-from sqlalchemy.orm import Session
-from crud import SessionLocal, get_user_by_username, create_user, update_failed_attempts, reset_failed_attempts, set_user_pin, verify_user_pin, update_password
-from models import User
 import random
-import hashlib
-import requests  # Thêm thư viện requests để tải HTML từ GitHub Pages
+import string
+import time
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
+from database import get_db
+from crud import get_user_by_username
+from pydantic import BaseModel
+from passlib.context import CryptContext
+from fastapi.middleware.cors import CORSMiddleware
+from models import User
 
 app = FastAPI()
 
-# Dependency để tạo session database
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Hàm băm mật khẩu (SHA256)
-def hash_password(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+# Dùng passlib để hash mật khẩu
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# Hàm tải trang HTML từ GitHub Pages
-def get_html_from_github_page(file_name: str) -> str:
-    url = f"https://nhannn3333.github.io/Nhan_html/{file_name}"  # Đảm bảo link GitHub Page chính xác
-    response = requests.get(url)
-    if response.status_code == 200:
-        return response.text
-    else:
-        return f"Error: Unable to fetch {file_name}"
+# Dùng bộ nhớ tạm thời để lưu thông tin về các lần đăng nhập không thành công và mã PIN
+failed_logins = {}
+pin_codes = {}
 
-# Trang đăng ký
-@app.get("/", response_class=HTMLResponse)
-def register_page(request: Request):
-    html_content = get_html_from_github_page("signUp.html")
-    return HTMLResponse(content=html_content, status_code=200)
+class UserCreate(BaseModel):
+    displayname: str
+    username: str
+    password: str
 
-# Xử lý đăng ký
-@app.post("/register", response_class=HTMLResponse)
-def register(
-    request: Request,
-    displayname: str = Form(...),
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db),
-):
-    user = get_user_by_username(db, username)
-    if user:
-        html_content = get_html_from_github_page("signUp.html")
-        return HTMLResponse(content=html_content.replace("<!-- error message -->", "Username already exists!"), status_code=400)
+class UserLogin(BaseModel):
+    username: str
+    password: str
+    pin: str = None  # Thêm trường pin để gửi mã pin
 
-    create_user(db, displayname, username, hash_password(password))
-    return RedirectResponse(url="/login", status_code=302)
-
-# Trang đăng nhập
-@app.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
-    html_content = get_html_from_github_page("index.html")
-    return HTMLResponse(content=html_content, status_code=200)
-
-# Xử lý đăng nhập
-@app.post("/login", response_class=HTMLResponse)
-def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
-    user = get_user_by_username(db, username)
-    if user is None:
-        html_content = get_html_from_github_page("index.html")
-        return HTMLResponse(content=html_content.replace("<!-- error message -->", "User not found!"), status_code=400)
-
-    # Kiểm tra số lần nhập sai
-    if user.failed_attempts >= 3:
-        # Tạo mã PIN và yêu cầu nhập
-        pin_code = str(random.randint(100000, 999999))
-        set_user_pin(db, user, pin_code)
-        html_content = get_html_from_github_page("pin.html")
-        return HTMLResponse(content=html_content.replace("{{ pin }}", pin_code), status_code=200)
+@app.post("/login")
+def login_user(user: UserLogin, db: Session = Depends(get_db)):
+    user_data = get_user_by_username(db, user.username)
+    
+    # Kiểm tra số lần đăng nhập sai
+    if user.username not in failed_logins:
+        failed_logins[user.username] = 0
+    
+    # Nếu người dùng đã nhập sai mật khẩu 3 lần
+    if failed_logins[user.username] >= 3:
+        if user.pin != pin_codes.get(user.username):
+            raise HTTPException(status_code=401, detail="Invalid PIN")
+        else:
+            failed_logins[user.username] = 0  # Reset số lần đăng nhập sai sau khi nhập đúng PIN
+            pin_codes.pop(user.username)  # Xóa mã PIN đã sử dụng
 
     # Kiểm tra mật khẩu
-    if user.hashed_password != hash_password(password):
-        update_failed_attempts(db, user)
-        html_content = get_html_from_github_page("index.html")
-        return HTMLResponse(content=html_content.replace("<!-- error message -->", "Invalid password!"), status_code=400)
+    if not user_data or not pwd_context.verify(user.password, user_data.hashed_password):
+        failed_logins[user.username] += 1
+        if failed_logins[user.username] >= 3:
+            pin_code = ''.join(random.choices(string.digits, k=6))
+            pin_codes[user.username] = pin_code
+            print(f"Generated PIN for {user.username}: {pin_code}")  # In mã PIN ra console server
+        raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    # Đăng nhập thành công, reset số lần nhập sai
-    reset_failed_attempts(db, user)
-    html_content = get_html_from_github_page("index.html")
-    return HTMLResponse(content=html_content.replace("<!-- success message -->", "Login successful!"), status_code=200)
+    return {"message": f"Welcome {user_data.displayname}!"}
 
-# Trang nhập mã PIN
-@app.post("/verify_pin", response_class=HTMLResponse)
-def verify_pin(request: Request, username: str = Form(...), pin: str = Form(...), db: Session = Depends(get_db)):
-    user = get_user_by_username(db, username)
-    if user is None:
-        html_content = get_html_from_github_page("index.html")
-        return HTMLResponse(content=html_content.replace("<!-- error message -->", "User not found!"), status_code=400)
-
-    if not verify_user_pin(db, user, pin):
-        html_content = get_html_from_github_page("pin.html")
-        return HTMLResponse(content=html_content.replace("{{ pin }}", "Invalid PIN. Please try again!"), status_code=400)
-
-    # Mã PIN đúng, chuyển đến trang đổi mật khẩu
-    return RedirectResponse(url=f"/reset_password?username={username}", status_code=302)
-
-# Trang đổi mật khẩu
-@app.get("/reset_password", response_class=HTMLResponse)
-def reset_password_page(request: Request, username: str):
-    html_content = get_html_from_github_page("reset.html")
-    return HTMLResponse(content=html_content.replace("{{ username }}", username), status_code=200)
-
-# Xử lý đổi mật khẩu
-@app.post("/reset_password", response_class=HTMLResponse)
-def reset_password(request: Request, username: str = Form(...), new_password: str = Form(...), db: Session = Depends(get_db)):
-    user = get_user_by_username(db, username)
-    if user is None:
-        html_content = get_html_from_github_page("index.html")
-        return HTMLResponse(content=html_content.replace("<!-- error message -->", "User not found!"), status_code=400)
-
-    # Cập nhật mật khẩu mới
-    update_password(db, user, hash_password(new_password))
-    reset_failed_attempts(db, user)
-    return RedirectResponse(url="/login", status_code=302)
+@app.post("/register")
+def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    if get_user_by_username(db, user.username):
+        return {"message": "Username already exists"}
+    hashed_password = pwd_context.hash(user.password)
+    new_user = create_user(db, displayname=user.displayname, username=user.username, hashed_password=hashed_password)
+    return {"message": "User created successfully", "user_id": new_user.id}
