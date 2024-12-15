@@ -1,89 +1,104 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Request, Form, Depends
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from database import get_db, engine
-from models import Base
-from crud import (
-    get_user_by_username,
-    create_user,
-    update_failed_attempts,
-    reset_failed_attempts,
-    set_user_pin,
-    verify_user_pin,
-    update_password
-)
-from passlib.context import CryptContext
-from pydantic import BaseModel
+from crud import SessionLocal, get_user_by_username, create_user, update_failed_attempts, reset_failed_attempts, set_user_pin, verify_user_pin, update_password
+from models import User
 import random
+import hashlib
 
-# Khởi tạo FastAPI
 app = FastAPI()
 
-# Tạo bảng trong cơ sở dữ liệu
-Base.metadata.create_all(bind=engine)
+# Cấu hình Jinja2 templates
+templates = Jinja2Templates(directory="templates")
 
-# Context mã hóa mật khẩu
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Dependency để tạo session database
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Khai báo các schema
-class UserCreate(BaseModel):
-    displayname: str
-    username: str
-    password: str
+# Hàm băm mật khẩu (SHA256)
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
-class UserLogin(BaseModel):
-    username: str
-    password: str
+# Trang đăng ký
+@app.get("/", response_class=HTMLResponse)
+def register_page(request: Request):
+    return templates.TemplateResponse("signUp.html", {"request": request})
 
-class PinVerification(BaseModel):
-    username: str
-    pin: str
-    new_password: str
+# Xử lý đăng ký
+@app.post("/register", response_class=HTMLResponse)
+def register(
+    request: Request,
+    displayname: str = Form(...),
+    username: str = Form(...),
+    password: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    user = get_user_by_username(db, username)
+    if user:
+        return templates.TemplateResponse("signUp.html", {"request": request, "error": "Username already exists!"})
 
-@app.post("/register")
-def register_user(user: UserCreate, db: Session = Depends(get_db)):
-    if get_user_by_username(db, user.username):
-        return {"message": "Username already exists"}
-    hashed_password = pwd_context.hash(user.password)
-    new_user = create_user(
-        db, 
-        displayname=user.displayname, 
-        username=user.username, 
-        hashed_password=hashed_password
-    )
-    return {"message": "User created successfully", "user_id": new_user.id}
+    create_user(db, displayname, username, hash_password(password))
+    return RedirectResponse(url="/login", status_code=302)
 
-@app.post("/login")
-def login_user(user: UserLogin, db: Session = Depends(get_db)):
-    db_user = get_user_by_username(db, user.username)
-    if not db_user:
-        raise HTTPException(status_code=400, detail="Invalid username or password")
+# Trang đăng nhập
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request})
 
-    if db_user.failed_attempts >= 3:
-        # Yêu cầu mã PIN nếu nhập sai 3 lần
-        pin_code = str(random.randint(1000, 9999))  # Tạo mã PIN ngẫu nhiên
-        set_user_pin(db, db_user, pin_code)
-        return {"message": "Too many failed attempts. Enter the PIN to proceed.", "pin_code": pin_code}
+# Xử lý đăng nhập
+@app.post("/login", response_class=HTMLResponse)
+def login(request: Request, username: str = Form(...), password: str = Form(...), db: Session = Depends(get_db)):
+    user = get_user_by_username(db, username)
+    if user is None:
+        return templates.TemplateResponse("index.html", {"request": request, "error": "User not found!"})
 
-    if not pwd_context.verify(user.password, db_user.hashed_password):
-        update_failed_attempts(db, db_user)
-        raise HTTPException(status_code=400, detail="Invalid username or password")
+    # Kiểm tra số lần nhập sai
+    if user.failed_attempts >= 3:
+        # Tạo mã PIN và yêu cầu nhập
+        pin_code = str(random.randint(100000, 999999))
+        set_user_pin(db, user, pin_code)
+        return templates.TemplateResponse("pin.html", {"request": request, "username": username, "pin": pin_code})
 
-    # Đăng nhập thành công
-    reset_failed_attempts(db, db_user)
-    return {"message": f"Welcome {db_user.displayname}!"}
+    # Kiểm tra mật khẩu
+    if user.hashed_password != hash_password(password):
+        update_failed_attempts(db, user)
+        return templates.TemplateResponse("index.html", {"request": request, "error": "Invalid password!"})
 
-@app.post("/verify-pin")
-def verify_pin(data: PinVerification, db: Session = Depends(get_db)):
-    db_user = get_user_by_username(db, data.username)
-    if not db_user:
-        raise HTTPException(status_code=400, detail="User not found")
+    # Đăng nhập thành công, reset số lần nhập sai
+    reset_failed_attempts(db, user)
+    return templates.TemplateResponse("index.html", {"request": request, "success": "Login successful!"})
 
-    if verify_user_pin(db, db_user, data.pin):
-        # Nếu mã PIN đúng, đổi mật khẩu
-        hashed_password = pwd_context.hash(data.new_password)
-        update_password(db, db_user, hashed_password)
-        reset_failed_attempts(db, db_user)  # Reset số lần nhập sai
-        set_user_pin(db, db_user, None)  # Xóa mã PIN
-        return {"message": "Password updated successfully"}
-    else:
-        raise HTTPException(status_code=400, detail="Invalid PIN")
+# Trang nhập mã PIN
+@app.post("/verify_pin", response_class=HTMLResponse)
+def verify_pin(request: Request, username: str = Form(...), pin: str = Form(...), db: Session = Depends(get_db)):
+    user = get_user_by_username(db, username)
+    if user is None:
+        return templates.TemplateResponse("index.html", {"request": request, "error": "User not found!"})
+
+    if not verify_user_pin(db, user, pin):
+        return templates.TemplateResponse("pin.html", {"request": request, "username": username, "pin": "Invalid PIN. Please try again!"})
+
+    # Mã PIN đúng, chuyển đến trang đổi mật khẩu
+    return RedirectResponse(url=f"/reset_password?username={username}", status_code=302)
+
+# Trang đổi mật khẩu
+@app.get("/reset_password", response_class=HTMLResponse)
+def reset_password_page(request: Request, username: str):
+    return templates.TemplateResponse("reset.html", {"request": request, "username": username})
+
+# Xử lý đổi mật khẩu
+@app.post("/reset_password", response_class=HTMLResponse)
+def reset_password(request: Request, username: str = Form(...), new_password: str = Form(...), db: Session = Depends(get_db)):
+    user = get_user_by_username(db, username)
+    if user is None:
+        return templates.TemplateResponse("index.html", {"request": request, "error": "User not found!"})
+
+    # Cập nhật mật khẩu mới
+    update_password(db, user, hash_password(new_password))
+    reset_failed_attempts(db, user)
+    return RedirectResponse(url="/login", status_code=302)
