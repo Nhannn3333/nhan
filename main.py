@@ -1,23 +1,14 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends
 from sqlalchemy.orm import Session
-from database import get_db
-from crud import get_user_by_username, create_user, increment_failed_attempts, reset_failed_attempts
-from pydantic import BaseModel
 from passlib.context import CryptContext
-from fastapi.middleware.cors import CORSMiddleware
+from models import User
+from database import get_db
+from pydantic import BaseModel
 
 app = FastAPI()
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Pydantic models
 class UserCreate(BaseModel):
     displayname: str
     username: str
@@ -26,6 +17,17 @@ class UserCreate(BaseModel):
 class UserLogin(BaseModel):
     username: str
     password: str
+
+# Helpers
+def get_user_by_username(db: Session, username: str):
+    return db.query(User).filter(User.username == username).first()
+
+def create_user(db: Session, displayname: str, username: str, hashed_password: str):
+    new_user = User(displayname=displayname, username=username, hashed_password=hashed_password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
 
 @app.post("/register")
 def register_user(user: UserCreate, db: Session = Depends(get_db)):
@@ -40,16 +42,19 @@ def login_user(user: UserLogin, db: Session = Depends(get_db)):
     db_user = get_user_by_username(db, user.username)
     if not db_user:
         return {"message": "Invalid username or password"}
-
-    if db_user.is_locked:
-        return {"message": "Account is locked due to too many failed login attempts."}
-
+    
+    if db_user.failed_attempts >= 3:
+        return {"message": "Account locked due to too many failed login attempts"}
+    
     if not pwd_context.verify(user.password, db_user.hashed_password):
-        increment_failed_attempts(db, db_user)
+        db_user.failed_attempts += 1
+        db.commit()
         remaining_attempts = 3 - db_user.failed_attempts
-        if db_user.is_locked:
-            return {"message": "Account is locked due to too many failed login attempts."}
-        return {"message": f"Invalid username or password. Remaining attempts: {remaining_attempts}"}
-
-    reset_failed_attempts(db, db_user)
+        if db_user.failed_attempts >= 3:
+            return {"message": "Account locked due to too many failed login attempts"}
+        return {"message": f"Invalid credentials. {remaining_attempts} attempts remaining."}
+    
+    # Reset failed attempts on successful login
+    db_user.failed_attempts = 0
+    db.commit()
     return {"message": f"Welcome {db_user.displayname}!"}
