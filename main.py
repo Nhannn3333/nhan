@@ -1,12 +1,14 @@
+# main.py
 from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import get_db
-from crud import get_user_by_username, create_user, increment_failed_attempts, reset_failed_attempts
+from crud import get_user_by_username, create_user
 from pydantic import BaseModel
 from passlib.context import CryptContext
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,18 +41,6 @@ def register_user(user: UserCreate, db: Session = Depends(get_db)):
 @app.post("/login")
 def login_user(user: UserLogin, db: Session = Depends(get_db)):
     db_user = get_user_by_username(db, user.username)
-    if not db_user:
+    if not db_user or not pwd_context.verify(user.password, db_user.hashed_password):
         return {"message": "Invalid username or password"}
-    
-    if db_user.is_locked:
-        return {"message": "Account is locked due to multiple failed login attempts. Please contact support."}
-
-    if not pwd_context.verify(user.password, db_user.hashed_password):
-        increment_failed_attempts(db, db_user)
-        remaining_attempts = 3 - db_user.failed_attempts
-        if db_user.is_locked:
-            return {"message": "Account is locked due to multiple failed login attempts. Please contact support."}
-        return {"message": f"Invalid password. {remaining_attempts} attempts remaining."}
-    
-    reset_failed_attempts(db, db_user)
     return {"message": f"Welcome {db_user.displayname}!"}
