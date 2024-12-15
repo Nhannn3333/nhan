@@ -1,4 +1,4 @@
-﻿altgraph==0.17.4
+altgraph==0.17.4
 annotated-types==0.7.0
 anyio==4.4.0
 CacheControl==0.14.0

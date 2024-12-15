@@ -1,7 +1,6 @@
-from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy import create_engine, Column, Integer, String, Boolean
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import sessionmaker, Session
 from models import User
 
 # Khai báo Base class cho SQLAlchemy
@@ -14,6 +13,8 @@ class User(Base):
     displayname = Column(String)
     username = Column(String, unique=True, index=True)
     hashed_password = Column(String)
+    failed_attempts = Column(Integer, default=0)
+    is_locked = Column(Boolean, default=False)
 
 # Cấu hình cơ sở dữ liệu SQLite
 DATABASE_URL = "sqlite:///./test.db"
@@ -36,3 +37,15 @@ def create_user(db: Session, displayname: str, username: str, hashed_password: s
     db.commit()
     db.refresh(db_user)
     return db_user
+
+def increment_failed_attempts(db: Session, user: User):
+    user.failed_attempts += 1
+    if user.failed_attempts >= 3:
+        user.is_locked = True
+    db.commit()
+    return user
+
+def reset_failed_attempts(db: Session, user: User):
+    user.failed_attempts = 0
+    db.commit()
+    return user
